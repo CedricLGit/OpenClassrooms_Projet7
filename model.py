@@ -67,31 +67,197 @@ def preprocess_train_test(df_train, df_test):
         
         df['ANNUITY_TO_CREDIT_RATIO'] = df['AMT_ANNUITY']/df['AMT_CREDIT']
         df['EMPLOYED_TO_BIRTH_RATIO'] = df['DAYS_EMPLOYED']/df['DAYS_BIRTH']
+        df['INCOME_TO_CREDIT_RATIO'] = df['AMT_INCOME_TOTAL']/df['AMT_CREDIT']
+        df['ANNUITY_TO_INCOME_RATIO'] = df['AMT_ANNUITY']/df['AMT_INCOME_TOTAL']
 
     # Equilibrer train et test pour avoir les memes colonnes
     X_train, X_test = X_train.align(X_test, join = 'left', axis=1)     
     
     return X_train, X_test, y_train
 
-def aggreg_num(df, agg_var):
+def aggreg_num(df, agg_var, df_name):
     
     '''
-    Regroupe les données numériques avec min/max/mean/sum/count? selon 
+    Regroupe les données numériques avec count/min/max/mean/sum selon 
     la variable agg_var
     '''
     
+    # Garder les variables quantitatives uniquement
+    num_df = df.select_dtypes('number').copy()
+    
+    # Récupérer la variable d'aggregation
+    num_df[agg_var] = df[agg_var]
+    
+    # Enlever les identifiants s'ils ne sont pas la variable d'aggregation
+    for col in num_df:
+        if col != agg_var and 'SK_ID' in col:
+            num_df = num_df.drop(columns = col)
 
+    # Grouper par variable d'aggregation
+    agg = num_df.groupby(agg_var).agg(['count', 'min', 'max', 'mean', 'sum'])
+
+    # Créer les noms des colonnes
+    columns = []
+
+    for var in agg.columns.levels[0]:
+        for stat in agg.columns.levels[1]:
+            columns.append('%s_%s_%s' % (df_name, var, stat))
+    
+    agg.columns = columns
+    
+    # Remove the columns with all redundant values
+    _, idx = np.unique(agg, axis = 1, return_index=True)
+    agg = agg.iloc[:, idx]
     
     return agg
+
+def aggreg_cat(df, agg_var, df_name):
     
+    '''
+    Regroupe les données qualitatives selon la variable agg_var
+    '''
     
+    # Selection des categories
+    categorical = pd.get_dummies(df.select_dtypes('category').copy())
+
+    # Récupérer la variable d'aggregation
+    categorical[agg_var] = df[agg_var]
+
+    # Grouper par variable d'aggregation
+    agg = categorical.groupby(agg_var).agg(['sum', 'mean'])
+    
+    # Créer les noms des colonnes
+    column_names = []
+    
+    for var in agg.columns.levels[0]:
+        for stat in agg.columns.levels[1]:
+            column_names.append('%s_%s_%s' % (df_name, var, stat))
+    
+    agg.columns = column_names
+    
+    # Remove duplicate columns by values
+    _, idx = np.unique(agg, axis = 1, return_index = True)
+    agg = agg.iloc[:, idx]
+    
+    return agg
+
+def aggreg_client(df, group_vars, df_name):
+    
+    '''
+    Regroupe les données par pret au niveau client. Group_vars doit
+    être constitué de la variable d'aggregation et d'identification
+    exemple : ['SK_ID_PREV', 'SK_ID_CURR']
+    '''
+    
+    # Aggreger quantitatives
+    df_agg_num = aggreg_num(df, group_vars[0], df_name)
+    
+    # Si il y a des variables qualitatives
+    if any(df.dtypes == 'category'):
+        df_agg_cat = aggreg_cat(df, group_vars[0], df_name)
+    
+        # Regrouper les deux df
+        df_agg = df_agg_cat.merge(df_agg_num, on=group_vars[0], how='outer')
+        
+        # Regrouper avec id client
+        df_agg = df_agg.merge(df[group_vars], on=group_vars[0], how='left')
+        
+        # Retirer la variable d'aggregation intermediaire
+        df_agg = df_agg.drop(columns=[group_vars[0]])
+        
+        # Regrouper par client
+        df_by_client = aggreg_num(df_agg, group_vars[1], 'CLIENT')
+        
+    # Sans variables qualitative
+    else:
+        # Regrouper avec id client
+        df_agg = df_agg_num.merge(df[group_vars], on=group_vars[0], how='left')
+        
+        # Retirer la variable d'aggregation intermediaire
+        df_agg = df_agg.drop(columns=[group_vars[0]])   
+        
+        # Regrouper par client
+        df_by_client = aggreg_num(df_agg, group_vars[1], 'CLIENT')
+    
+    return df_by_client
+
+def preprocess_bureau():
+    
+    bureau = pd.read_csv('Data/bureau.csv')
+    bureau_balance = pd.read_csv('Data/bureau_balance.csv')
+    
+    num_agg_bb = aggreg_num(bureau_balance, 'SK_ID_BUREAU', 'BUREAU_BALANCE')
+    cat_agg_bb = aggreg_cat(bureau_balance, 'SK_ID_BUREAU', 'BUREAU_BALANCE')
+    
+    for df in [num_agg_bb, cat_agg_bb]:
+        bureau = bureau.merge(df, on='SK_ID_BUREAU', how='left')
+        
+    agg_bureau = aggreg_client(bureau, ['SK_ID_BUREAU', 'SK_ID_CURR'], 'BUREAU')
+    
+    return agg_bureau
+
+def custom_score(y_true, y_pred):
+    
+    '''
+    On veut minimiser le risque de prêter à un client qui a un risque élevé de
+    ne pas rembourser le prêt
+    
+    1 -> client with difficulty (recall à maximiser)
+    0 -> others (precision à prendre en compte)
+    
+    déséquilibre des classes ?????? threshold, under/oversampling
+    '''
+    y_true-ypred en mettant coefficient
+    pass
+
+def modelisation(df_to_fit):
+    
+    clf = LGBMClassifier(n_jobs=-1,
+                         random_state=42)
+    
+    params = {'n_estimators': ,
+              'learning_rate': ,
+              'num_leaves': ,
+              'colsample_bytree': ,
+              'subsample': ,
+              'max_depth': ,
+              'reg_alpha': ,
+              'reg_lambda': ,
+              'min_child_weight': }
     pass
 
 ##############################################################################
 
+def main():
+    
+    df_train = pd.read_csv('Data/application_train.csv')
+    df_test = pd.read_csv('Data/application_test.csv')
+    cc_balance = pd.read_csv('Data/credit_card_balance.csv')
+    installments = pd.read_csv('Data/installments_payments.csv')
+    cash_balance = pd.read_csv('Data/POS_CASH_balance.csv')
+    previous = pd.read_csv('Data/previous_application.csv')
+    dic_df = {'CC_BALANCE': cc_balance, 'INSTALLMENTS': installments,
+              'CASH_BALANCE': cash_balance, 'PREVIOUS': previous}
+    
+    bureau = preprocess_bureau()
+    
+    for k,v in dic_df.iteritems():
+        dic_df[k] = aggreg_client(v, ['SK_ID_PREV', 'SK_ID_CURRENT'], k)
+
+    for df in [df_train, df_test]:
+        
+        for df_ag in [bureau, cc_balance, installments, cash_balance, previous]:
+            
+            df = df.join(df_ag, on='SK_ID_CURR', how='left')
+
+
+    pass
+
 df_train = pd.read_csv('Data/application_train.csv')
 df_test = pd.read_csv('Data/application_test.csv')
+cc_balance = pd.read_csv('Data/credit_card_balance.csv')
+installments = pd.read_csv('Data/installments_payments.csv')
+cash_balance = pd.read_csv('Data/POS_CASH_balance.csv')
+previous = pd.read_csv('Data/previous_application.csv')
 bureau = pd.read_csv('Data/bureau.csv')
 bureau_balance = pd.read_csv('Data/bureau_balance.csv')
-
-
