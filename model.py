@@ -12,11 +12,12 @@ https://www.kaggle.com/jsaguiar/lightgbm-with-simple-features
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.metrics import make_scorer
 from sklearn.model_selection import GridSearchCV, train_test_split
-from imblearn.over_sampling import SMOTE
-from imblearn.under_sampling import RandomUnderSampler
+from sklearn.linear_model import LogisticRegression
+from imblearn.pipeline import Pipeline as imbpipeline
+from imblearn.combine import SMOTEENN
 
 ##############################################################################
 
@@ -241,10 +242,16 @@ def grid(data_to_fit, y):
     
     X_train, X_test, y_train, y_test = train_test_split(data_to_fit, y)
     
-    clf = LGBMClassifier(n_jobs=-1,
-                         random_state=42)
+    # modèles
     
-    scoring = {'score_k{}'.format(i): make_scorer(custom_loss, k=i,
+    clf_lgbm = LGBMClassifier(n_jobs=-1,
+                              random_state=42)
+    
+    clf_lr = LogisticRegression()
+    
+    # Score
+    
+    scoring = {'score_k={}'.format(i): make_scorer(custom_loss, k=i,
                                                   greater_is_better=False)
                for i in np.arange(1,5)}
     
@@ -252,38 +259,49 @@ def grid(data_to_fit, y):
     # sur la metrique auroc disponibles sur le kaggle suivant  
     # https://www.kaggle.com/jsaguiar/lightgbm-with-simple-features
     
-    params = {'n_estimators': np.arange(8000, 12001, 500),
-              'learning_rate': [0.01, 0.02,0.03, 0.04, 0.05], 
-              'num_leaves': np.arange(25, 50), 
-              'colsample_bytree': np.arange(0.7, 1, 0.05), 
-              'subsample': np.arange(0.7, 1, 0.05), 
-              'max_depth': np.arange(5, 11), 
-              'reg_alpha': [0.02, 0.03, 0.04, 0.05, 0.1], 
-              'reg_lambda': np.arange(0.05, 0.11, 0.01), 
-              'min_child_weight': [0.01, 0.1, 25, 30, 35, 40, 50, 100]}
+    params_lgbm = {'clf__n_estimators': np.arange(8000, 12001, 500),
+                   'clf__learning_rate': [0.01, 0.02,0.03, 0.04, 0.05],
+                   'clf__num_leaves': np.arange(25, 50),
+                   'clf__colsample_bytree': np.arange(0.7, 1, 0.05),
+                   'clf__subsample': np.arange(0.7, 1, 0.05),
+                   'clf__max_depth': np.arange(5, 11),
+                   'clf__reg_alpha': [0.02, 0.03, 0.04, 0.05, 0.1],
+                   'clf__reg_lambda': np.arange(0.05, 0.11, 0.01),
+                   'clf__min_child_weight': [0.01, 0.1, 25, 30, 35, 40, 50, 100]}
     
-    grid = GridSearchCV(clf,
-                        param_grid=params,
-                        scoring=scoring,
-                        refit=False,
-                        cv=5)
+    params_lr = {'clf__C': [0.05, 0.1, 0.2, 0.5, 1]}
+
+    # Sampling avec combinaise under/oversampling avec SMOTEENN
     
-    # Sampling X_train pour équilibrer lors de l'apprentissage
+    pipeline_lgbm = imbpipeline([['sampling', SMOTEENN(random_state=42)],
+                                 ['scaler', StandardScaler()],
+                                 ['clf', clf_lgbm]])
     
-    nb_defaut = y_train[y_train == 1].shape[0]
-    x_train_defaut = X_train[y_train == 1].copy()
-    y_train_defaut = y_train[y_train == 1].copy()
-    x_train_ok = X_train[y_train == 0].copy().sample(n=nb_defaut)
-    y_train_ok = y_train[y_train == 0].copy()
+    pipeline_lr = imbpipeline([['sampling', SMOTEENN(random_state=42)],
+                               ['scaler', StandardScaler()],
+                               ['clf', clf_lr]])
     
+    # Gridsearch pour le classifier lgbm
     
-    # Fit la gridsearch
+    grid_lgbm = GridSearchCV(pipeline_lgbm,
+                             param_grid=params_lgbm,
+                             scoring=scoring,
+                             refit=False,
+                             cv=5)
     
-    grid.fit(X_train, y_train)
+    grid_lr = GridSearchCV(pipeline_lr, 
+                           param_grid=params_lr,
+                           scoring=scoring,
+                           refit=False,
+                           cv=5)
     
-    result = pd.DataFrame(grid.cv_results_)
+    for grid in [grid_lgbm, grid_lr]:
+        grid.fit(X_train, y_train)
+    
+    result_lgbm = pd.DataFrame(grid_lgbm.cv_results_)
+    result_lr = pd.DataFrame(grid_lr.cv_results_)
         
-    return result
+    return result_lgbm, result_lr
 
 ##############################################################################
 
@@ -311,6 +329,8 @@ def main():
             
         df = df.merge(bureau, on='SK_ID_CURR', how='left')
         
+    grid(df_train, y_train)
+        
     pass
 
 df_train = pd.read_csv('Data/application_train.csv')
@@ -320,9 +340,6 @@ installments = pd.read_csv('Data/installments_payments.csv')
 cash_balance = pd.read_csv('Data/POS_CASH_balance.csv')
 previous = pd.read_csv('Data/previous_application.csv')
 bureau = preprocess_bureau()
-
-y=df_train['TARGET']
-
 dic_df = {'CC_BALANCE': cc_balance, 'INSTALLMENTS': installments, 'CASH_BALANCE': cash_balance, 'PREVIOUS': previous}
 df_train, df_test, y_train = preprocess_train_test(df_train, df_test)
 
@@ -339,6 +356,4 @@ for df in [df_train, df_test]:
         df = df.merge(v, on='SK_ID_CURR', how='left')
         print(k)
         
-
-print(previous['SK_ID_CURR'])
-print(df_train['SK_ID_CURR'])
+result_lgbm, result_lr = grid(df_train, y_train)
