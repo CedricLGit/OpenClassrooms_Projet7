@@ -11,13 +11,20 @@ https://www.kaggle.com/jsaguiar/lightgbm-with-simple-features
     
 import numpy as np
 import pandas as pd
+import pickle
 from lightgbm import LGBMClassifier
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.metrics import make_scorer
+from sklearn.metrics import make_scorer, confusion_matrix
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
 from imblearn.pipeline import Pipeline as imbpipeline
 from imblearn.combine import SMOTEENN
+import xgboost as xgb
+import re
+import time
+import shap
 
 ##############################################################################
 
@@ -195,19 +202,19 @@ def aggreg_client(df, group_vars, df_name):
 
 def preprocess_bureau():
     
-    bureau = pd.read_csv('Data/bureau.csv')
-    bureau_balance = pd.read_csv('Data/bureau_balance.csv')
+    bureau_raw = pd.read_csv('Data/bureau.csv')
+    bureau_balance_raw = pd.read_csv('Data/bureau_balance.csv')
     
-    bureau = reduce_memory_usage(bureau)
-    bureau_balance = reduce_memory_usage(bureau_balance)
+    bureau_raw = reduce_memory_usage(bureau_raw)
+    bureau_balance_raw = reduce_memory_usage(bureau_balance_raw)
     
-    num_agg_bb = aggreg_num(bureau_balance, 'SK_ID_BUREAU', 'BUREAU_BALANCE')
-    cat_agg_bb = aggreg_cat(bureau_balance, 'SK_ID_BUREAU', 'BUREAU_BALANCE')
+    num_agg_bb = aggreg_num(bureau_balance_raw, 'SK_ID_BUREAU', 'BUREAU_BALANCE')
+    cat_agg_bb = aggreg_cat(bureau_balance_raw, 'SK_ID_BUREAU', 'BUREAU_BALANCE')
     
     for df in [num_agg_bb, cat_agg_bb]:
-        bureau = bureau.merge(df, on='SK_ID_BUREAU', how='left')
+        bureau_raw = bureau_raw.merge(df, on='SK_ID_BUREAU', how='left')
         
-    agg_bureau = aggreg_client(bureau, ['SK_ID_BUREAU', 'SK_ID_CURR'], 'BUREAU')
+    agg_bureau = aggreg_client(bureau_raw, ['SK_ID_BUREAU', 'SK_ID_CURR'], 'BUREAU')
     
     return agg_bureau
 
@@ -218,7 +225,7 @@ def custom_loss(y_true, y_pred, k):
     ne pas rembourser le prêt
     
     1 -> client with difficulty (recall à maximiser)
-    0 -> others (precision à prendre en compte)
+    0 -> others
     
     k argument pour pondérer le poids des erreurs de type FN
     '''
@@ -228,80 +235,147 @@ def custom_loss(y_true, y_pred, k):
         result = []
         
         for i in np.arange(y_true.shape[0]):
-            if y_true[i] == 1:
-                diff = k*(y_true[i] - y_pred[i])
+            if y_true.iloc[i] == 1:
+                diff = k*(y_true.iloc[i] - y_pred[i])
             else:
-                diff = (y_true[i]-y_pred[i])
+                diff = (y_true.iloc[i]-y_pred[i])
             result.append(diff)
             
-        result = sum(abs(result))
+        result = np.sum(np.absolute(result))
         
     return result
 
+def cleaning(df):
+    
+    # Supprimer les colonnes qui ont plus de 20% de na
+    
+    perc = 0.5*df.shape[0]
+    
+    df_clean = df.dropna(axis=1, thresh=perc).copy()
+    
+    # Supprimer les colonnes redondantes (corrélation élevées) ?
+    
+    # Imputer les nans
+    
+    for col in df_clean.columns[df_clean.isna().any()]:
+        df_clean[col].fillna(df_clean[col].mean(), inplace = True)
+    
+    return df_clean
+
 def grid(data_to_fit, y):
     
-    X_train, X_test, y_train, y_test = train_test_split(data_to_fit, y)
+    X = cleaning(data_to_fit)
+    X = X.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y)
     
     # modèles
     
-    clf_lgbm = LGBMClassifier(n_jobs=-1,
-                              random_state=42)
-    
-    clf_lr = LogisticRegression()
+    models = {'lgbm': LGBMClassifier(n_jobs=-1,
+                              random_state=42,
+                              max_depth=10,
+                              n_estimators=200,
+                              learning_rate=0.02,
+                              num_leaves=35),
+              'RF': RandomForestClassifier(n_jobs=-1,
+                                           random_state=42,
+                                           n_estimators=200),
+              'XGB': xgb.XGBClassifier(n_jobs=-1,
+                                       random_state=42,
+                                       n_estimators=200,
+                                       learning_rate=0.02,
+                                       use_label_encoder=False,
+                                       max_depth=10),
+              'LR': LogisticRegression(n_jobs=-1,
+                                       max_iter=1000,
+                                       random_state=42)}
     
     # Score
     
     scoring = {'score_k={}'.format(i): make_scorer(custom_loss, k=i,
                                                   greater_is_better=False)
-               for i in np.arange(1,5)}
+               for i in [2, 5, 10]}
     
     # Plage de paramètres autour des params trouvés par byaesan optimisation
     # sur la metrique auroc disponibles sur le kaggle suivant  
     # https://www.kaggle.com/jsaguiar/lightgbm-with-simple-features
     
-    params_lgbm = {'clf__n_estimators': np.arange(8000, 12001, 500),
-                   'clf__learning_rate': [0.01, 0.02,0.03, 0.04, 0.05],
-                   'clf__num_leaves': np.arange(25, 50),
-                   'clf__colsample_bytree': np.arange(0.7, 1, 0.05),
-                   'clf__subsample': np.arange(0.7, 1, 0.05),
-                   'clf__max_depth': np.arange(5, 11),
-                   'clf__reg_alpha': [0.02, 0.03, 0.04, 0.05, 0.1],
-                   'clf__reg_lambda': np.arange(0.05, 0.11, 0.01),
-                   'clf__min_child_weight': [0.01, 0.1, 25, 30, 35, 40, 50, 100]}
-    
-    params_lr = {'clf__C': [0.05, 0.1, 0.2, 0.5, 1]}
+    params = {'lgbm': {'clf__colsample_bytree': [0.8, 0.85, 0.9],
+                       'clf__subsample': [0.8, 0.85, 0.9],
+                       'clf__reg_alpha': [0.03, 0.04, 0.05],
+                       'clf__reg_lambda': [0.06, 0.07, 0.08]},
+              'RF': {'clf__min_samples_split': [2, 10, 50],
+                     'clf__min_samples_leaf': [1, 10, 50],
+                     'clf__max_samples': [0.8, 0.85, 0.9],
+                     'clf__max_depth': [3, 5, 10]},
+              'XGB': {'clf__subsample': [0.8, 0.85, 0.9],
+                      'clf__colsample_bytree': [0.8, 0.85, 0.9],
+                      'clf__reg_alpha': [0.03, 0.04, 0.05],
+                      'clf__reg_lambda': [0.06, 0.07, 0.08]},
+              'LR': {'clf__C': [0.05, 0.1, 0.2, 0.5, 1]}}
 
     # Sampling avec combinaise under/oversampling avec SMOTEENN
     
-    pipeline_lgbm = imbpipeline([['sampling', SMOTEENN(random_state=42)],
-                                 ['scaler', StandardScaler()],
-                                 ['clf', clf_lgbm]])
+    pipelines = {}
     
-    pipeline_lr = imbpipeline([['sampling', SMOTEENN(random_state=42)],
-                               ['scaler', StandardScaler()],
-                               ['clf', clf_lr]])
+    for key, value in models.items():
+        pipelines[key] = imbpipeline([['sampling', SMOTEENN(n_jobs=-1,
+                                                            random_state=42)],
+                                      ['scaler', StandardScaler()],
+                                      ['clf', value]])
     
     # Gridsearch pour le classifier lgbm
     
-    grid_lgbm = GridSearchCV(pipeline_lgbm,
-                             param_grid=params_lgbm,
-                             scoring=scoring,
-                             refit=False,
-                             cv=5)
+    grids = {}
     
-    grid_lr = GridSearchCV(pipeline_lr, 
-                           param_grid=params_lr,
-                           scoring=scoring,
-                           refit=False,
-                           cv=5)
-    
-    for grid in [grid_lgbm, grid_lr]:
-        grid.fit(X_train, y_train)
-    
-    result_lgbm = pd.DataFrame(grid_lgbm.cv_results_)
-    result_lr = pd.DataFrame(grid_lr.cv_results_)
+    for key in models:
+        grids[key] = GridSearchCV(pipelines[key],
+                                  param_grid=params[key],
+                                  scoring=scoring,
+                                  refit=False,
+                                  cv=3)
         
-    return result_lgbm, result_lr
+    # Results
+    
+    results = {}
+    
+    for key, gridsearch in grids.items():
+        tstart = time.time()
+        results[key] = gridsearch.fit(X_train, y_train).cv_results_
+        tstop=time.time()
+        print(key, tstop-tstart)
+    
+    # Refit
+    
+    refit = {}
+
+    for model in models:
+    
+        sub_result = pd.DataFrame(results[model])
+    
+        for score in scoring:
+    
+            sub_result_byscore = sub_result[sub_result['rank_test_{}'.format(score)] == 1]
+            index_min = sub_result_byscore.mean_fit_time.idxmin()
+            best_params = sub_result_byscore.loc[index_min]['params']
+                
+            refit[model+'_'+score] = pipelines[model].set_params(**best_params).fit(X_train, y_train)
+
+    mod_fit = {}
+
+    for model in refit:
+    
+        mod_fit[model] = Pipeline(refit[model].steps[1:])
+
+    conf = {}
+
+    for model in mod_fit:
+    
+        y_pred = mod_fit[model].predict(X_test)
+    
+        conf[model] = confusion_matrix(y_test, y_pred)
+        
+    return results, mod_fit, conf
 
 ##############################################################################
 
@@ -333,27 +407,164 @@ def main():
         
     pass
 
-df_train = pd.read_csv('Data/application_train.csv')
-df_test = pd.read_csv('Data/application_test.csv')
+df_appli_train = pd.read_csv('Data/train_sample.csv')
+df_appli_test = pd.read_csv('Data/application_test.csv')
 cc_balance = pd.read_csv('Data/credit_card_balance.csv')
 installments = pd.read_csv('Data/installments_payments.csv')
 cash_balance = pd.read_csv('Data/POS_CASH_balance.csv')
 previous = pd.read_csv('Data/previous_application.csv')
 bureau = preprocess_bureau()
+df_appli_train, df_appli_test, y_appli_train = preprocess_train_test(df_appli_train, df_appli_test)
 dic_df = {'CC_BALANCE': cc_balance, 'INSTALLMENTS': installments, 'CASH_BALANCE': cash_balance, 'PREVIOUS': previous}
-df_train, df_test, y_train = preprocess_train_test(df_train, df_test)
-
-for df in [df_train, df_test, cc_balance, installments, cash_balance, previous, bureau]:
-    
-    reduce_memory_usage(df)
 
 for k,v in dic_df.items():
+    dic_df[k] = reduce_memory_usage(v)
+    
+for k,v in dic_df.items():
     dic_df[k] = aggreg_client(v, ['SK_ID_PREV', 'SK_ID_CURR'], k)
+    
+df_appli_train = reduce_memory_usage(df_appli_train)
+df_appli_test = reduce_memory_usage(df_appli_test)
+bureau = reduce_memory_usage(bureau)
 
-for df in [df_train, df_test]:
-        
-    for k, v in dic_df.items():   
-        df = df.merge(v, on='SK_ID_CURR', how='left')
-        print(k)
-        
-result_lgbm, result_lr = grid(df_train, y_train)
+
+# for dataframe in [df_train_prep, df_test_prep]:
+dataframe = df_appli_train.copy()
+for k, v in dic_df.items():   
+    dataframe = dataframe.merge(v, on='SK_ID_CURR', how='left')
+    print(k)
+
+del bureau, cc_balance, installments, cash_balance, previous, dic_df, df_appli_test, k, v, df_appli_train
+
+dataframe = cleaning(dataframe)
+dataframe = reduce_memory_usage(dataframe)
+
+result, modfit, confu = grid(dataframe, y_appli_train)
+
+X = dataframe.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+    
+X_train, X_test, y_train, y_test = train_test_split(X, y_appli_train)
+    
+# models = {'lgbm': LGBMClassifier(n_jobs=-1,
+#                                  random_state=42,
+#                                  max_depth=10,
+#                                  n_estimators=200,
+#                                  learning_rate=0.02,
+#                                  num_leaves=35),
+#           'RF': RandomForestClassifier(n_jobs=-1,
+#                                        random_state=42,
+#                                        n_estimators=200),
+#           'XGB': xgb.XGBClassifier(n_jobs=-1,
+#                                    n_estimators=200,
+#                                    use_label_encoder=False),
+#           'LR': LogisticRegression(n_jobs=-1,
+#                                        max_iter=1000,
+#                                        random_state=42)}
+
+# scoring = {'score_k={}'.format(i): make_scorer(custom_loss, k=i,
+#                                                 greater_is_better=False)
+#             for i in [2, 5, 10, 20]}
+
+# params = {'lgbm': {'clf__colsample_bytree': [0.8, 0.85],
+#                    'clf__subsample': [0.8, 0.85]},
+#           'RF': {'clf__max_samples': [0.8, 0.85],
+#                  'clf__max_depth': [3, 10]},
+#           'XGB': {'clf__subsample': [0.8, 0.85],
+#                   'clf__max_depth': [3, 10]},
+#           'LR': {'clf__C': [0.05, 0.1, 0.2, 0.5, 1]}}
+
+# pipelines = {}
+
+# for key, value in models.items():
+#     pipelines[key] = imbpipeline([['sampling', SMOTEENN(n_jobs=-1,
+#                                                           random_state=42)],
+#                                  ['scaler', StandardScaler()],
+#                                  ['clf', value]])
+    
+# grids = {}
+
+
+# for key, gridsearch in grids.items():
+#     tstart = time.time()
+#     results[key] = gridsearch.fit(X_train, y_train).cv_results_
+#     tstop=time.time()
+#     print(key, tstop-tstart)
+
+# refit = {}
+
+# for model in models:
+    
+#     sub_result = pd.DataFrame(results[model])
+    
+#     for score in scoring:
+    
+#         sub_result_byscore = sub_result[sub_result['rank_test_{}'.format(score)] == 1]
+#         index_min = sub_result_byscore.mean_fit_time.idxmin()
+#         best_params = sub_result_byscore.loc[index_min]['params']
+                
+#         refit[model+'_'+score] = pipelines[model].set_params(**best_params).fit(X_train, y_train)
+
+# mod_fit = {}
+
+# for model in refit:
+    
+#     mod_fit[model] = Pipeline(refit[model].steps[1:])
+
+# conf = {}
+
+# for model in mod_fit:
+    
+#     y_pred = mod_fit[model].predict(X_test)
+    
+#     conf[model] = confusion_matrix(y_test, y_pred)
+    
+from sklearn.metrics import precision_recall_curve
+import matplotlib.pyplot as plt
+
+
+
+legende=[]
+for mod in modfit:
+    
+    y_prob = modfit[mod].predict_proba(X_train)[:,1]
+
+    precision_, recall_, thresh_ = precision_recall_curve(y_train, y_prob)
+    legende.append(mod)
+
+
+    plt.plot(recall_, precision_)
+    plt.legend(legende, loc='best', bbox_to_anchor=(1.5, 1))
+    plt.xlabel('recall')
+    plt.ylabel('precision')
+    plt.title('Precision/recall curve')
+    
+F3 = []
+y_prob = modfit['XGB_score_k=2'].predict_proba(X_train)[:,1]
+precision_, recall_, thresh_ = precision_recall_curve(y_train, y_prob)
+    
+for i in np.arange(len(thresh_)):
+    F3.append((1+1.1**2)*precision_[i]*recall_[i]/((1.1**2)*precision_[i]+recall_[i]))
+    
+thresh_[F3.index(max(F3))]
+precision_[F3.index(max(F3))]
+recall_[F3.index(max(F3))]
+   
+name = 'selected_model.sav'
+pickle.dump(modfit['XGB_score_k=2'], open(name, 'wb'))
+
+# SHAP // fi via xgb
+
+model = modfit['XGB_score_k=2']['clf']
+
+xgb.plot_importance(model, max_num_features=10)
+plt.show()
+
+shap.initjs()
+
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_train)
+
+shap.force_plot(explainer.expected_value, shap_values[0,:], X_test.iloc[0],
+                matplotlib=True)
+    
+shap.summary_plot(shap_values, X_train, plot_type="bar")
