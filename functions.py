@@ -12,8 +12,51 @@ import plotly.express as px
 import plotly.graph_objs as go
 import plotly.figure_factory as ff
 from plotly.subplots import make_subplots
+from sklearn.preprocessing import LabelEncoder
+
+def preprocess(df):
+    
+    '''
+    Encoder les variables qualitatives
+    Aligner train et test set au besoin
+    '''    
+    
+    # Encoder en 0/1 les categories avec seulement 2 valeurs
+    le = LabelEncoder()
+    
+    for col, col_type in df.dtypes.iteritems():
+        if (col_type == 'object') and (len(df[col].unique()) == 2):
+            le.fit(df[col])
+            le.transform(df[col])
+            
+    # Encoder en 'OneHot' les variables de type category
+    df = pd.get_dummies(df)
+
+    # Il y a des valeurs anormales pour 'DAYS_EMPLOYED' que l'on va supprimer  
+    df['DAYS_EMPLOYED'].replace(365243, np.nan, inplace=True)    
+    
+    return df
 
 @st.cache # Cache pour performances streamlit
+def cleaning(df):
+    
+    # Supprimer les colonnes qui ont plus de 50% de na
+    
+    perc = 0.5*df.shape[0]
+    
+    df_clean = df.dropna(axis=1, thresh=perc).copy()
+    
+    # Imputer les nans
+    
+    numdata = df_clean.select_dtypes('number')
+    datcol = df_clean.select_dtypes('number')
+    
+    for col in numdata.columns[numdata.isna().any()]:
+        df_clean[col].fillna(df_clean[col].mean(), inplace = True)
+    
+    return df_clean
+
+@st.cache
 def countplot(dataframe, x):
     
     dtype = dataframe[x].dtype

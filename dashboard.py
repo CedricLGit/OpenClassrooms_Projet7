@@ -9,10 +9,13 @@ import pandas as pd
 import streamlit as st
 import numpy as np
 from functions import *
-
-data = pd.read_csv('Data/sample_to_train.csv')
+import requests
 
 st.set_page_config(layout='wide')
+
+data = pd.read_csv('Data/application_train.csv')
+data = preprocess(data)
+data = cleaning(data)
 
 # Base Sidebar
 sb = st.sidebar
@@ -48,11 +51,14 @@ elif pages=='Analyse Exploratoire':
     st.table(correlation(data))
     
     choices = st.multiselect(label="Veuillez choisir les variables à afficher",
-                             options=correlation(data).index)
+                                  options=correlation(data).index)
+    button = st.button('Show me')
     
-    st.plotly_chart(distribution(data, choices))
+    if button:
     
-    
+        if len(choices) != 0:
+        
+            st.plotly_chart(distribution(data, choices))    
     
 elif pages=='Paramètres du modèle':
     
@@ -70,7 +76,9 @@ elif pages=='Dashboard':
             st.write("")
 
         with col5:
-            st.text_input('Client selection', help='Fill up with a client id')
+            client_id = st.text_input('Client selection', help='Fill up with a client id')
+            result = requests.get('http://127.0.0.1:5000/predict', {'client_id': client_id}).text
+            st.write('score =', result)
 
         with col6:
             st.write("")
