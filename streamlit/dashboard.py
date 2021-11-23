@@ -13,7 +13,7 @@ import requests
 
 st.set_page_config(layout='wide')
 
-data = pd.read_csv('Data/application_train.csv')
+data = pd.read_csv('Data_streamlit/application_train.csv')
 data = preprocess(data)
 data = cleaning(data)
 
@@ -67,6 +67,8 @@ elif pages=='Paramètres du modèle':
     
 elif pages=='Dashboard':
     
+    sample = pd.read_csv('Data_streamlit/sample_to_train.csv')
+    
     c=st.container()
     
     with c:
@@ -76,13 +78,19 @@ elif pages=='Dashboard':
             st.write("")
 
         with col5:
+            
             client_id = st.text_input('Client selection', help='Fill up with a client id')
-            result = requests.get('http://127.0.0.1:5000/predict', {'client_id': client_id}).text
-            st.write('score =', result)
+            
+            if client_id != '':
+            
+                if int(client_id) in sample.SK_ID_CURR.values:
+                    result = requests.get('http://127.0.0.1:5000/predict', {'client_id': client_id}).text
+                    st.write('score =', result)
+                    
+                else:
+                    st.write('Ce client ne figure pas dans la base de données')
 
         with col6:
             st.write("")
-        
-    st.write("This is outside the container")
 
     

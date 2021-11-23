@@ -14,11 +14,12 @@ import plotly.figure_factory as ff
 from plotly.subplots import make_subplots
 from sklearn.preprocessing import LabelEncoder
 
+
+@st.cache
 def preprocess(df):
     
     '''
     Encoder les variables qualitatives
-    Aligner train et test set au besoin
     '''    
     
     # Encoder en 0/1 les categories avec seulement 2 valeurs

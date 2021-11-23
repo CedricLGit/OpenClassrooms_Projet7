@@ -8,7 +8,7 @@ import numpy as np
 app = Flask(__name__)
 
 def load_models():
-    file_name = "models/selected_model_smote.sav"
+    file_name = "Data_API/selected_model_smote.sav"
     with open(file_name, 'rb') as pickled:
         model = pickle.load(pickled)
     return model
@@ -17,7 +17,7 @@ def load_models():
 @app.route('/predict', methods=['GET'])
 def predict():
     
-    data = pd.read_csv('../Data/sample_to_train.csv')
+    data = pd.read_csv('Data_API/sample_to_train.csv')
     
     # stub input features
     # x = np.array(data.drop('TARGET', axis=1).iloc[0]).reshape(1,-1)
