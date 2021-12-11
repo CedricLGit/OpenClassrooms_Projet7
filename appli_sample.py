@@ -23,3 +23,6 @@ new_df_1 = df_1.sample(n_1)
 df_sample = pd.concat([new_df_0, new_df_1])
 
 df_sample.to_csv('Data/train_sample.csv', index=False)
+
+# La même méthode est utilisée sur sample_to_train.csv avec n_rows = 15000
+# pour des raisons de taille de fichier sur github
