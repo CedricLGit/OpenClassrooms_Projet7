@@ -27,10 +27,12 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from imblearn.pipeline import Pipeline as imbpipeline
-from imblearn.over_sampling import SMOTE
+from imblearn.combine import SMOTEENN
 import xgboost as xgb
 import re
 import time
+import shap
+import matplotlib.pyplot as plt
 
 ##############################################################################
 
@@ -289,8 +291,8 @@ def grid(data_to_fit, y):
               'XGB': xgb.XGBClassifier(n_jobs=-1,
                                        random_state=42,
                                        n_estimators=200,
-                                       learning_rate=0.02,
                                        use_label_encoder=False,
+                                       learning_rate=0.02,
                                        max_depth=10),
               'LR': LogisticRegression(n_jobs=-1,
                                        max_iter=1000,
@@ -306,31 +308,31 @@ def grid(data_to_fit, y):
     # sur la metrique auroc disponibles sur le kaggle suivant  
     # https://www.kaggle.com/jsaguiar/lightgbm-with-simple-features
     
-    params = {'lgbm': {'clf__colsample_bytree': [0.8, 0.85, 0.9],
-                       'clf__subsample': [0.8, 0.85, 0.9],
+    params = {'lgbm': {'clf__colsample_bytree': [0.85, 0.9],
+                       'clf__subsample': [0.85, 0.9],
                        'clf__reg_alpha': [0.03, 0.04, 0.05],
                        'clf__reg_lambda': [0.06, 0.07, 0.08]},
               'RF': {'clf__min_samples_split': [2, 10, 50],
                      'clf__min_samples_leaf': [1, 10, 50],
                      'clf__max_samples': [0.8, 0.85, 0.9],
                      'clf__max_depth': [3, 5, 10]},
-              'XGB': {'clf__subsample': [0.8, 0.85, 0.9],
-                      'clf__colsample_bytree': [0.8, 0.85, 0.9],
+              'XGB': {'clf__subsample': [0.85, 0.9],
+                      'clf__colsample_bytree': [0.85, 0.9],
                       'clf__reg_alpha': [0.03, 0.04, 0.05],
                       'clf__reg_lambda': [0.06, 0.07, 0.08]},
               'LR': {'clf__C': [0.05, 0.1, 0.2, 0.5, 1]}}
 
-    # Sampling avec combinaise under/oversampling avec SMOTEENN
+    # Combinaison undersampling et oversampling avec SMOTEENN (imbalance dataset)
     
     pipelines = {}
     
     for key, value in models.items():
-        pipelines[key] = imbpipeline([['sampling', SMOTE(n_jobs=-1,
-                                                         random_state=42)],
+        pipelines[key] = imbpipeline([['sampling', SMOTEENN(n_jobs=-1,
+                                                            random_state=42)],
                                       ['scaler', StandardScaler()],
                                       ['clf', value]])
     
-    # Gridsearch pour le classifier lgbm
+    # Gridsearch
     
     grids = {}
     
@@ -351,7 +353,7 @@ def grid(data_to_fit, y):
         tstop=time.time()
         print(key, tstop-tstart)
     
-    # Refit
+    # Refit les modèles selon les meilleurs et plus rapides pour chaque fonction de score
     
     refit = {}
 
@@ -367,51 +369,48 @@ def grid(data_to_fit, y):
                 
             refit[model+'_'+score] = pipelines[model].set_params(**best_params).fit(X_train, y_train)
 
+    # Récupération des modèles fit (smoteenn uniquement sur train donc enlevé)
     mod_fit = {}
 
     for model in refit:
     
         mod_fit[model] = Pipeline(refit[model].steps[1:])
-
+        
+    # Optimisation du threshold avec une pondération fixée à 7 après itérations
+    # et comparaison des matrices de confusion
     conf = {}
 
-    for model in mod_fit:
-    
-        y_pred = mod_fit[model].predict(X_test)
-    
-        conf[model] = confusion_matrix(y_test, y_pred)
+    for key, mod in mod_fit.items():
         
-    return results, mod_fit, conf
+        y_prob = mod.predict_proba(X_test)[:,1]
+        thresholds = set(y_prob) # on parcourt la liste des proba de predictions
+        
+        score = []
+        
+        for thresh in thresholds:
+            
+            y_pred = (y_prob > thresh).astype(bool)
+            score_tresh = custom_loss(y_test, y_pred, k=7)
+            score.append(score_tresh)
+        
+        sco = min(score)
+        idx = np.where(score == sco)
+        
+        if len(idx[0]) == 1:
+            tre = list(thresholds)[idx[0][0]]
+        else:
+            pot_tre=[]
+            for i in idx[0]:
+                pot_tre.append(list(thresholds)[i])
+            tre = max(pot_tre)
+                
+        y_pred_fix = (y_prob > tre).astype(bool)
+
+        conf[key] = (sco, tre, confusion_matrix(y_test, y_pred_fix))
+        
+    return X_train, X_test, y_train, y_test, results, mod_fit, conf
 
 ##############################################################################
-
-def main():
-    
-    df_train = pd.read_csv('Data/application_train.csv')
-    df_test = pd.read_csv('Data/application_test.csv')
-    cc_balance = pd.read_csv('Data/credit_card_balance.csv')
-    installments = pd.read_csv('Data/installments_payments.csv')
-    cash_balance = pd.read_csv('Data/POS_CASH_balance.csv')
-    previous = pd.read_csv('Data/previous_application.csv')
-    dic_df = {'CC_BALANCE': cc_balance, 'INSTALLMENTS': installments,
-              'CASH_BALANCE': cash_balance, 'PREVIOUS': previous}
-    
-    bureau = preprocess_bureau()
-    df_train, df_test, y_train = preprocess_train_test(df_train, df_test)
-    
-    for k,v in dic_df.items():
-        dic_df[k] = aggreg_client(v, ['SK_ID_PREV', 'SK_ID_CURR'], k)
-
-    for df in [df_train, df_test]:
-        
-        for k, v in dic_df.items():   
-            df = df.merge(v, on='SK_ID_CURR', how='left')
-            
-        df = df.merge(bureau, on='SK_ID_CURR', how='left')
-        
-    grid(df_train, y_train)
-        
-    pass
 
 df_appli_train = pd.read_csv('Data/train_sample.csv')
 df_appli_test = pd.read_csv('Data/application_test.csv')
@@ -433,76 +432,60 @@ df_appli_train = reduce_memory_usage(df_appli_train)
 df_appli_test = reduce_memory_usage(df_appli_test)
 bureau = reduce_memory_usage(bureau)
 
-
-# for dataframe in [df_train_prep, df_test_prep]:
-dataframe2 = df_appli_train.copy()
+dataframe = df_appli_train.copy()
 for k, v in dic_df.items():   
-    dataframe2 = dataframe2.merge(v, on='SK_ID_CURR', how='left')
+    dataframe = dataframe.merge(v, on='SK_ID_CURR', how='left')
     print(k)
 
 del bureau, cc_balance, installments, cash_balance, previous, dic_df, df_appli_test, k, v, df_appli_train
 
-dataframe2 = cleaning(dataframe2)
-dataframe2 = reduce_memory_usage(dataframe2)
+dataframe = cleaning(dataframe)
+dataframe = reduce_memory_usage(dataframe)
 
-result2, modfit2, confu2 = grid(dataframe2, y_appli_train)
+dataframe2 = dataframe.drop('SK_ID_CURR', axis=1)
 
-X2 = dataframe2.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-    
-X_train2, X_test2, y_train2, y_test2 = train_test_split(X2, y_appli_train)
+X_train, X_test, y_train, y_test, result, modfit, confu = grid(dataframe2, y_appli_train)
 
-from sklearn.metrics import precision_recall_curve
-import matplotlib.pyplot as plt
+model = modfit['XGB_score_k=5']
 
-legende2=[]
-for mod in modfit2:
-    
-    y_prob2 = modfit2[mod].predict_proba(X_train2)[:,1]
+# matrice de confusion avant optimisation du threshold pour comparer
+confusion_matrix(y_test, model.predict(X_test))
 
-    precision2_, recall2_, thresh2_ = precision_recall_curve(y_train2, y_prob2)
-    legende2.append(mod)
+# Recup les noms de variables pour feature importance
+model['clf'].get_booster().feature_names = dataframe2.columns.tolist()
 
-    plt.plot(recall2_, precision2_)
-    plt.legend(legende2, loc='best', bbox_to_anchor=(1.5, 1))
-    plt.xlabel('recall')
-    plt.ylabel('precision')
-    plt.title('Precision/recall curve SMOTE')
+# Feature imp xgboost
+xgb.plot_importance(model['clf'], max_num_features=10)
+xgb.plot_importance(model['clf'], max_num_features=10, importance_type='gain')
 
-model = pickle.load(open('selected_model_smote.sav', 'rb'))
- 
-y_prob2 = model.predict_proba(X_test2)[:,1]
-thresholds = set(y_prob2)
+# Utilisation shap values pour explique rle modele
+explainer = shap.TreeExplainer(model['clf'])
+shap_values = explainer.shap_values(X_train)
 
-score = []
+shap.summary_plot(shap_values, X_train, plot_type="bar")
+shap.summary_plot(shap_values, X_train)
 
-for thresh in thresholds:
-    
-    y_pred = (y_prob2 > thresh).astype(bool)
-    score_tresh = custom_loss(y_test2, y_pred, k=2)
-    score.append(score_tresh)
+# explication prediction individu
+shap.force_plot(explainer.expected_value, shap_values[0,:], X_test.columns.tolist(),
+                contribution_threshold=0.025,
+                matplotlib=True)
+
+'''
+    Pour des raisons pratiques (éviter manipulation de fichiers sur streamlit, 
+    taille des fighiers sur github etc) on aura sur streamlit les shapvalues de 
+    toutes les données au lieu de faire la distinction train/test set comme celà
+    a été fait proprement ici.
+'''
+
+# Sauvegarde/serialisation du modele
+name='model_smote_v3.sav'
+pickle.dump(model, open(name, 'wb'))
 
 
-np.where(score == min(score))
-score[196]
+# Sauvegarde du jeu de données traité qu'il faudra echantillonner pour la présentation
+data_to_train = dataframe.join(y_appli_train)
+data_to_train.to_csv('Data/sample_to_train.csv', index=False)  
 
-list(thresholds)[588]
 
-y_pred_fix = (y_prob2 > list(thresholds)[588]).astype(bool)
 
-confusion_matrix(y_test2, y_pred_fix)
 
-data_to_train = dataframe2.join(y_appli_train)
-data_to_train.to_csv('Data/sample_to_train.csv', index=False)
-# precision2_, recall2_, thresh2_ = precision_recall_curve(y_train2, y_prob2)
-    
-# for i in np.arange(len(thresh2_)):
-#     F2smote.append((1+2**2)*precision2_[i]*recall2_[i]/((2**2)*precision2_[i]+recall2_[i]))
-    
-# thresh2_[F2smote.index(max(F2smote))]
-# precision2_[F2smote.index(max(F2smote))]
-# recall2_[F2smote.index(max(F2smote))]
-
-# name2 = 'selected_model_smote.sav'
-# pickle.dump(modfit2['XGB_score_k=10'], open(name2, 'wb'))
-
-test_api = list(X_test2.iloc[1,:])
